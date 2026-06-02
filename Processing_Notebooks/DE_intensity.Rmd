@@ -1,0 +1,279 @@
+# load libraries
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+```
+
+#Merge slides if needed 
+```{r}
+cell_profiler_process_path <- "/Users/kristineccles/Downloads/DE//output/"
+
+merge_data <- function(cell_profiler_process_path, slide = NULL) {
+  
+  # Automatically detect plate folders
+  if (is.null(slide)) {
+    slide <- list.dirs(cell_profiler_process_path,
+                        recursive = FALSE,
+                        full.names = FALSE)
+    slide <- slide[str_detect(slide, "^Slide")]
+  }
+  
+  add_suffix <- function(df, suffix, key_cols) {
+    non_key <- setdiff(names(df), key_cols)
+    rename_with(df, ~ paste0(.x, suffix), all_of(non_key))
+  }
+  
+  merge_slide <- function(slide_dir, slide_name) {
+    
+    Nuclei     <- read_csv(file.path(slide_dir, "Nuclei.csv"),     show_col_types = FALSE)
+    Perinuclei <- read_csv(file.path(slide_dir, "Perinuclei.csv"), show_col_types = FALSE)
+    
+    key_cols <- names(Nuclei)[1:7]
+    
+    Nuclei     <- add_suffix(Nuclei,     "_nuclei",     key_cols)
+    Perinuclei <- add_suffix(Perinuclei, "_perinuclei", key_cols)
+    
+    join_keys <- Reduce(intersect,
+                        list(names(Nuclei), names(Perinuclei)))
+    
+    Nuclei %>%
+      full_join(Perinuclei, by = join_keys)
+  }
+  
+  map_dfr(slide, function(slide) {
+    slide_dir <- file.path(cell_profiler_process_path, slide)
+    message("Reading: ", slide_dir)
+    merge_slide(slide_dir, slide_name = slide)
+  })
+}
+
+all_data <- merge_data(cell_profiler_process_path)
+```
+
+#Find thresholds
+```{r}
+all_data <- all_data %>%
+  mutate(
+    SOX17_ratio = Intensity_MedianIntensity_CSox17_nuclei /
+                  (Intensity_MedianIntensity_CSox17_perinuclei)
+  )
+
+hist(all_data$SOX17_ratio, breaks = 10)
+
+#greater than 1 = pos
+all_data <- all_data %>%
+  mutate(
+    SOX17_status = ifelse(is.na(SOX17_ratio) | SOX17_ratio <= 1, "Sox17_neg", "Sox17_pos") #i checked some status is NA become NHFa4 median intensity is 0 i set to negative
+  )
+
+
+all_data <- all_data %>%
+  mutate(
+    CXCR4_ratio = Intensity_MedianIntensity_CCxcr4_nuclei/
+                  (Intensity_MedianIntensity_CCxcr4_perinuclei)
+  )
+
+hist(all_data$CXCR4_ratio, breaks = 10)
+
+#greater than 1 = pos
+all_data <- all_data %>%
+  mutate(
+    CXCR4_status = ifelse(is.na(CXCR4_ratio) | CXCR4_ratio <= 1, "Cxcr4_neg", "Cxcr4_pos") #i checked some status is NA become median intensity is 0 i set to negative
+  )
+
+
+hist <- all_data %>%
+  select(
+    Metadata_slide,
+    Metadata_coverslip,
+    Metadata_sex,
+    SOX17  = Intensity_MedianIntensity_CSox17_nuclei,
+    CXCR4    = Intensity_MedianIntensity_CCxcr4_nuclei
+  ) %>%
+  pivot_longer(
+     cols      = -c(Metadata_slide, Metadata_sex, Metadata_coverslip),  # pivot everything except the slide column
+    names_to  = "marker",
+    values_to = "intensity"
+  )
+
+ggplot(hist, aes(x = intensity, fill = marker, color = marker)) +
+  geom_density(alpha = 0.3) +
+  facet_grid(marker ~ Metadata_slide + Metadata_sex , 
+             scales = "free") +
+  scale_x_continuous(limits = c(0, 1)) +
+  labs(x = "Mean Intensity", y = "Density", 
+       title = "Per-slide intensity thresholds") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+#Classify cells
+```{r}
+# Classify cells
+all_data_classified <- all_data %>%
+  mutate(
+    Sox17_pos = SOX17_status == "Sox17_pos",
+    Cxcr4_pos = CXCR4_status == "Cxcr4_pos",
+
+    # Detailed phenotype (
+  hepatic_class = case_when(
+      Sox17_pos &  Cxcr4_pos  ~ "Sox17+/Cxcra4+",    
+      Sox17_pos &  !Cxcr4_pos ~ "Sox17+/Cxcra4-",
+    !Sox17_pos &  Cxcr4_pos ~ "Sox17-/Cxcra4+",
+  TRUE ~ "Non-DE"
+)) %>%
+select(1:7,
+         Intensity_MedianIntensity_CSox17_nuclei,
+       Intensity_MedianIntensity_CropBlue_nuclei,
+         Intensity_MedianIntensity_CCxcr4_nuclei,
+         Sox17_pos, Cxcr4_pos, 
+         hepatic_class)
+```
+
+
+#Plot Hepatic class
+```{r}
+custom_colors <- c("#330597", "#9c179e","#cc4778", "#ed7953", "#fdb42f")
+shape_map <- c('female' = 24, 'male' = 21)
+# Summarize phenotype frequencies
+hepatic_class <- all_data_classified %>%
+  
+  # Step 1: percent per image (within each slide)
+  group_by(Metadata_slide, Metadata_sex, Metadata_image, hepatic_class) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(Metadata_slide, Metadata_sex, Metadata_image) %>%
+  mutate(percent = 100 * n / sum(n)) %>%
+  
+  # Step 2: collapse images → slide, sd/se are across images within a slide
+  group_by(Metadata_slide, Metadata_sex, hepatic_class) %>%
+  summarise(
+    mean_percent = mean(percent, na.rm = TRUE),
+    sd           = sd(percent, na.rm = TRUE),
+    n            = n(),        # number of images per slide
+    .groups      = "drop"
+  ) %>%
+   # Step 3: collapse slides → sex, sd/se now across slides
+  group_by(Metadata_sex, hepatic_class) %>%
+  summarise(
+    mean_percent = mean(mean_percent, na.rm = TRUE),
+    sd           = sd(mean_percent, na.rm = TRUE),
+    n            = n(),        # number of slides per sex
+    .groups      = "drop"
+  ) %>%
+  mutate(se = sd / sqrt(n))
+
+
+hepatic_class$hepatic_class <- factor(hepatic_class$hepatic_class, levels = c(
+  "Sox17+/Cxcra4+",
+  "Sox17+/Cxcra4-",
+  "Sox17-/Cxcra4+",
+  "Non-DE"
+))
+
+hepatic_summary <- hepatic_class %>%
+  group_by(hepatic_class) %>%
+  summarise(
+    mean_percent = mean(mean_percent, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p <- ggplot(hepatic_class,
+       aes(x = hepatic_class,
+           y = mean_percent,
+           color = factor(hepatic_class))) +
+  
+  geom_col(
+    aes(fill = factor(hepatic_class)),
+    alpha = 0.15,
+    position = position_dodge(width = 0.7),
+    width = 0.6,
+    inherit.aes = FALSE,
+    # need x and y too since inherit.aes = FALSE
+    data = hepatic_summary,
+    mapping = aes(x = hepatic_class,
+                  y = mean_percent,
+                  fill = factor(hepatic_class))
+  ) +
+  
+  geom_errorbar(
+    aes(ymin = mean_percent - se,
+        ymax = mean_percent + se),
+    width = 0.2,
+    position = position_dodge(width = 0.7)
+  ) +
+  
+  geom_jitter(
+    aes(fill = factor(hepatic_class), shape = Metadata_sex),
+
+    alpha = 0.4,
+    size = 3,
+    position = position_jitterdodge(
+      dodge.width = 0.7,
+      jitter.width = 0.15
+    )
+  ) +
+  
+  scale_fill_manual(values = custom_colors,  name = "hepatic_class") +
+  scale_color_manual(values = custom_colors, name = "hepatic_class") +
+     scale_shape_manual(values = shape_map, name = "Metadata_sex") +
+  labs(y = "%", x = NULL) +
+  
+  scale_y_continuous(
+    limits = c(0, NA),
+    expand = expansion(mult = c(0.025, 0.05))
+  ) +
+  
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Arial", size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+p
+#ggsave("../plots/hepatic_class.png", plot = p, width = 7.5, height = 5, dpi = 300,bg = "white")
+
+hepatic_class_grouped <- hepatic_class %>%
+  mutate(bar_group = ifelse(hepatic_class == "Non-DE", "Non-DE", "DE"))
+
+p_stacked_de <- ggplot(hepatic_class_grouped,
+       aes(x = bar_group,
+           y = mean_percent,
+           fill = factor(hepatic_class))) + 
+  geom_col( 
+    alpha = 0.85,
+    width = 0.5,
+    position = position_stack()
+  ) +
+  facet_wrap(~Metadata_sex) +
+  scale_fill_manual(values = custom_colors, name = "Phenotype") +
+  
+  labs(y = "%", x = NULL) +
+  
+  scale_y_continuous(
+    limits = c(0, 100),
+    expand = expansion(mult = c(0.025, 0.05))
+  ) +
+  
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Arial", size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+p_stacked_de
+#ggsave("../plots/hepatic_class_stacked2.png", plot = p_stacked,
+       #width = 5, height = 5, dpi = 300, bg = "white")
+```
+
+
+
