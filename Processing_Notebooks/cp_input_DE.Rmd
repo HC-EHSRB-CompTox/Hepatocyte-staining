@@ -1,11 +1,21 @@
 #Load libraries
 ```{r}
 library(tidyverse)
+library(magick)
+```
+
+#CONVERT TO GREY SCALE
+```{r}
+
+img <- image_read("input.tif")
+gray <- image_convert(img, colorspace = "gray")
+
+image_write(gray, "grayscale.tif", format = "tiff")
 ```
 
 #to make the .csv that feeds into cell profiler 
 ```{r}
-path <- "/Users/kristineccles/SynologyDrive/CPImages/Staining/DE/raw images/"
+path <- "/Users/compt/SynologyDrive/iPSC-hepatocyte experiment/Staining/DE/raw images/"
 files <- list.files(
   path         = path,
   pattern      = "\\.tif$",
@@ -84,7 +94,7 @@ df_cp %>%
     slide_id <- unique(.x$Metadata_slide)
     sex_id <- unique(.x$Metadata_sex)
     
-    write_csv(.x, paste0("/Users/kristineccles/SynologyDrive/CPImages/Staining/DE/Metadata/metadata_slide_", slide_id, sex_id, ".csv"))
+    write_csv(.x, paste0("/Users/compt/SynologyDrive/iPSC-hepatocyte experiment/Staining/DE/Metadata/metadata_slide_", slide_id, sex_id, ".csv"))
   })
 
 ```

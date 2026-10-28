@@ -1,0 +1,269 @@
+# load libraries
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+```
+
+#Merge slides if needed 
+```{r}
+cell_profiler_process_path <- "/Users/compt/SynologyDrive/iPSC-hepatocyte experiment/Staining/IPSC (ch0=dapi, ch1= oct4, ch2=sox2)/output/"
+
+merge_data <- function(cell_profiler_process_path, slide = NULL) {
+  
+  # Automatically detect plate folders
+  if (is.null(slide)) {
+    slide <- list.dirs(cell_profiler_process_path,
+                        recursive = FALSE,
+                        full.names = FALSE)
+    slide <- slide[str_detect(slide, "^Slide")]
+  }
+  
+  add_suffix <- function(df, suffix, key_cols) {
+    non_key <- setdiff(names(df), key_cols)
+    rename_with(df, ~ paste0(.x, suffix), all_of(non_key))
+  }
+  
+  merge_slide <- function(slide_dir, slide_name) {
+    
+    Nuclei     <- read_csv(file.path(slide_dir, "Nuclei.csv"),     show_col_types = FALSE)
+    Perinuclei <- read_csv(file.path(slide_dir, "Perinuclei.csv"), show_col_types = FALSE)
+    
+    key_cols <- names(Nuclei)[1:7]
+    
+    Nuclei     <- add_suffix(Nuclei,     "_nuclei",     key_cols)
+    Perinuclei <- add_suffix(Perinuclei, "_perinuclei", key_cols)
+    
+    join_keys <- Reduce(intersect,
+                        list(names(Nuclei), names(Perinuclei)))
+    
+    Nuclei %>%
+      full_join(Perinuclei, by = join_keys)
+  }
+  
+  map_dfr(slide, function(slide) {
+    slide_dir <- file.path(cell_profiler_process_path, slide)
+    message("Reading: ", slide_dir)
+    merge_slide(slide_dir, slide_name = slide)
+  })
+}
+
+all_data <- merge_data(cell_profiler_process_path)
+```
+
+#Find thresholds
+```{r}
+all_data <- all_data %>%
+  mutate(
+    Sox2_ratio = Intensity_MedianIntensity_Sox2_nuclei /
+                  (Intensity_MedianIntensity_Sox2_perinuclei)
+  )
+
+hist(all_data$Sox2_ratio, breaks = 10)
+
+#greater than 1 = pos
+all_data <- all_data %>%
+  mutate(
+    Sox2_status = ifelse(is.na(Sox2_ratio) | Sox2_ratio <= 1, "Sox2_neg", "Sox2_pos") #i checked some status is NA become NHFa4 median intensity is 0 i set to negative
+  )
+
+
+all_data <- all_data %>%
+  mutate(
+    OCT4_ratio = Intensity_MedianIntensity_Oct4_nuclei/
+                  (Intensity_MedianIntensity_Oct4_perinuclei)
+  )
+
+hist(all_data$OCT4_ratio, breaks = 10)
+
+#greater than 1 = pos
+all_data <- all_data %>%
+  mutate(
+    OCT4_status = ifelse(is.na(OCT4_ratio) | OCT4_ratio <= 1, "OCT4_neg", "OCT4_pos") #i checked some status is NA become median intensity is 0 i set to negative
+  )
+
+
+hist <- all_data %>%
+  select(
+    Metadata_slide,
+    Metadata_coverslip,
+    Metadata_sex,
+    SOX2  = Intensity_MedianIntensity_Sox2_nuclei,
+    OCT4    = Intensity_MedianIntensity_Oct4_nuclei
+  ) %>%
+  pivot_longer(
+     cols      = -c(Metadata_slide, Metadata_sex, Metadata_coverslip),  # pivot everything except the slide column
+    names_to  = "marker",
+    values_to = "intensity"
+  )
+
+ggplot(hist, aes(x = intensity, fill = marker, color = marker)) +
+  geom_density(alpha = 0.3) +
+  facet_grid(marker ~ Metadata_slide + Metadata_sex , 
+             scales = "free") +
+  scale_x_continuous(limits = c(0, 1)) +
+  labs(x = "Mean Intensity", y = "Density", 
+       title = "Per-slide intensity thresholds") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+#Classify cells
+```{r}
+# Classify cells
+all_data_classified <- all_data %>%
+  mutate(
+    Sox2_pos = Sox2_status == "Sox2_pos",
+    OCT4_pos = OCT4_status == "OCT4_pos",
+
+    # Detailed phenotype (
+  class = case_when(
+      Sox2_pos &  OCT4_pos  ~ "Sox2+/Oct4+",    
+      Sox2_pos &  !OCT4_pos ~ "Sox2+/Oct4-",
+    !Sox2_pos &  OCT4_pos ~ "Sox2-/Oct4+",
+  TRUE ~ "Non-IPSC"
+)) %>%
+select(1:7,
+         Intensity_MedianIntensity_Sox2_nuclei,
+         Intensity_MedianIntensity_Oct4_nuclei,
+         Sox2_pos, OCT4_pos, 
+         class)
+```
+
+
+#Plot  class
+```{r}
+custom_colors <- c("#330597", "#9c179e","#cc4778", "#ed7953", "#fdb42f")
+# Summarize phenotype frequencies
+# Step 1: Calculate percentages per image
+class_image <- all_data_classified %>%
+  group_by(Metadata_slide, Metadata_image, class) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(Metadata_slide,, Metadata_image) %>%
+  mutate(percent = 100 * n / sum(n)) %>%
+  ungroup()
+
+# Step 2: Calculate means across images within each slide
+class_slide <- class_image %>%
+  group_by(Metadata_slide, class) %>%
+  summarise(
+    mean_percent = mean(percent, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Step 3: Calculate means and SE across slides within each sex
+class_summary <- class_slide %>%
+  group_by(class) %>%
+  summarise(
+    grand_mean = mean(mean_percent, na.rm = TRUE),
+    sd = sd(mean_percent, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(se = sd / sqrt(n))
+
+# Set class order
+class_summary$class <- factor(
+  class_summary$class,
+  levels = c(
+    "Sox2+/Oct4+",
+    "Sox2+/Oct4-",
+    "Sox2-/Oct4+",
+    "Non-IPSC"
+  )
+)
+p <- ggplot(
+  class_summary,
+  aes(x = class, y = grand_mean, fill = factor(class))
+) +
+  geom_col(
+    alpha = 0.15,
+    width = 0.6
+  ) +
+
+  geom_errorbar(
+    aes(
+      ymin = grand_mean - se,
+      ymax = grand_mean + se
+    ),
+    width = 0.2
+  ) +
+
+  geom_jitter(
+    data = class_slide,
+    aes(
+      x = class,
+      y = mean_percent,
+      fill = factor(class),
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.4,
+    size = 3,
+    position = position_jitterdodge(
+      dodge.width = 0.7,
+      jitter.width = 0.15
+    )
+  ) +
+
+  scale_fill_manual(values = custom_colors, name = "class") +
+
+  labs(y = "%", x = NULL) +
+
+  scale_y_continuous(
+    limits = c(0, NA),
+    expand = expansion(mult = c(0.025, 0.05))
+  ) +
+
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Arial", size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+p
+#ggsave("../plots/class.png", plot = p, width = 7.5, height = 5, dpi = 300,bg = "white")
+
+class_grouped <- class %>%
+  mutate(bar_group = ifelse(class == "Non-IPSC", "Non-IPSC", "IPSC"))
+
+p_stacked_IPSC <- ggplot(class_grouped,
+       aes(x = bar_group,
+           y = mean_percent,
+           fill = factor(class))) + 
+  geom_col( 
+    alpha = 0.85,
+    width = 0.5,
+    position = position_stack()
+  ) +
+  facet_wrap(~Metadata_sex) +
+  scale_fill_manual(values = custom_colors, name = "Phenotype") +
+  
+  labs(y = "%", x = NULL) +
+  
+  scale_y_continuous(
+    limits = c(0, 100),
+    expand = expansion(mult = c(0.025, 0.05))
+  ) +
+  
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Arial", size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black")
+  )
+
+p_stacked_IPSC
+#ggsave("../plots/class_stacked2.png", plot = p_stacked,
+       #width = 5, height = 5, dpi = 300, bg = "white")
+```
+
+
+
