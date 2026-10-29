@@ -1,269 +1,287 @@
-# load libraries
-```{r}
-library(readxl)
-library(dplyr)
+# Load libraries
+```{r setup}
 library(tidyverse)
-library(ggplot2)
+```
+#to make the .csv that feeds into cell profiler 
+```{r}
+path <- "/Users/kristineccles/SynologyDrive/comptox/iPSC-hepatocyte experiment/Staining/IPSC (ch0=dapi, ch1= oct4, ch2=sox2)/raw images/"
+files <- list.files(
+  path         = path,
+  pattern      = "\\.tif$",
+  recursive    = TRUE,   # <-- goes into slide1_female/, slide2_male/
+  full.names   = TRUE    # <-- keeps the full path so we can extract folder name
+)
+
+df <- tibble(filepath = files) %>%
+  mutate(filename = normalizePath(filepath)) %>%
+  mutate(
+    filename = str_remove(filename, "\\.tif$"),
+
+  # extract channel
+    channel = str_extract(filename, "ch\\d+$") %>%
+      str_remove("ch") %>%
+      as.integer(),
+    # extract coverslip and image number
+    coverslip = str_extract(filename, "c\\d+") %>%
+      str_remove("c") %>%
+      as.integer(),
+    image = str_extract(filename, "-\\d+_ch") %>%
+      str_remove("-") %>%
+      str_remove("_ch") %>%
+      as.integer(),
+
+    condition = str_remove(filename, "_c\\d+-\\d+_ch\\d+$") %>%
+      basename(),
+
+    # from folder name
+ slide = str_extract(filepath, "(?i)slide\\s?(\\d+)") %>%
+  str_extract("\\d+") %>%
+  as.integer(),
+
+    sex = str_extract(filepath, "(?i)(female|male)")
+  )
+
+
+
+# Add channel info
+df <- df %>%
+  mutate(
+    stain = case_when(
+      channel == 0 ~ "DNA",
+      channel == 1 ~ "Oct4", #green
+      channel == 2 ~ "Sox2", #RED
+    )
+  )
+
+# Reshape for CP — one image per row
+df_cp <- df %>%
+  mutate(
+    FileName = basename(filepath),
+    PathName = dirname(normalizePath(filepath))                 
+  ) %>%
+  pivot_wider(
+    id_cols = c(coverslip, image, condition, slide, sex),
+    names_from = stain,
+    values_from = c(FileName, PathName),
+    names_glue = "{.value}_{stain}"
+  ) %>%
+  rename_with(~ paste0("Metadata_", .), c(coverslip, image, condition, slide, sex))
+
+# Clean up
+df_cp <- df_cp %>%
+  rename_with(~gsub(" ", "", .))
+
+df_cp <- df_cp %>%
+  mutate(across(where(is.list), ~ sapply(., `[`, 1)))
+
+sapply(df_cp, class)
+
+#each slide should be run seprately in fluerecence chnages
+df_cp %>%
+  group_split(Metadata_slide, Metadata_sex) %>%
+  walk(~{
+    slide_id <- unique(.x$Metadata_slide)
+    sex_id <- unique(.x$Metadata_sex)
+    
+    write_csv(.x, paste0("/Users/kristineccles/SynologyDrive/comptox/iPSC-hepatocyte experiment/Staining/IPSC (ch0=dapi, ch1= oct4, ch2=sox2)/Metadata/metadata_slide_", slide_id, sex_id, ".csv"))
+  })
+
+```
+# Paths AFTER CELL PROFILER
+```{r}
+cell_profiler_input_path <- "/Users/kristineccles/SynologyDrive/comptox/iPSC-hepatocyte experiment/Staining/IPSC (ch0=dapi, ch1= oct4, ch2=sox2)/output/"
+
+cell_profiler_output_path  <- "../output/"
+plot_dir  <- "../plots/IPSC"
 ```
 
-#Merge slides if needed 
+# Load Nuclei.csv from every slide folder
 ```{r}
-cell_profiler_process_path <- "/Users/compt/SynologyDrive/iPSC-hepatocyte experiment/Staining/IPSC (ch0=dapi, ch1= oct4, ch2=sox2)/output/"
-
-merge_data <- function(cell_profiler_process_path, slide = NULL) {
-  
-  # Automatically detect plate folders
+load_nuclei <- function(path, slide = NULL) {
   if (is.null(slide)) {
-    slide <- list.dirs(cell_profiler_process_path,
-                        recursive = FALSE,
-                        full.names = FALSE)
+    slide <- list.dirs(path, recursive = FALSE, full.names = FALSE)
     slide <- slide[str_detect(slide, "^Slide")]
   }
-  
-  add_suffix <- function(df, suffix, key_cols) {
-    non_key <- setdiff(names(df), key_cols)
-    rename_with(df, ~ paste0(.x, suffix), all_of(non_key))
-  }
-  
-  merge_slide <- function(slide_dir, slide_name) {
-    
-    Nuclei     <- read_csv(file.path(slide_dir, "Nuclei.csv"),     show_col_types = FALSE)
-    Perinuclei <- read_csv(file.path(slide_dir, "Perinuclei.csv"), show_col_types = FALSE)
-    
-    key_cols <- names(Nuclei)[1:7]
-    
-    Nuclei     <- add_suffix(Nuclei,     "_nuclei",     key_cols)
-    Perinuclei <- add_suffix(Perinuclei, "_perinuclei", key_cols)
-    
-    join_keys <- Reduce(intersect,
-                        list(names(Nuclei), names(Perinuclei)))
-    
-    Nuclei %>%
-      full_join(Perinuclei, by = join_keys)
-  }
-  
-  map_dfr(slide, function(slide) {
-    slide_dir <- file.path(cell_profiler_process_path, slide)
-    message("Reading: ", slide_dir)
-    merge_slide(slide_dir, slide_name = slide)
+  map_dfr(slide, function(s) {
+    f <- file.path(path, s, "Nuclei.csv")
+    message("Reading: ", f)
+    read_csv(f, show_col_types = FALSE) %>%
+      mutate(slide_folder = s)
   })
 }
 
-all_data <- merge_data(cell_profiler_process_path)
+nuclei <- load_nuclei(cell_profiler_input_path)
+
+# Check what CellProfiler exported
+grep("^Classify_|^Math_", names(nuclei), value = TRUE)
 ```
 
-#Find thresholds
+# Turn the Classify_ columns into one class column
 ```{r}
-all_data <- all_data %>%
+class_labels <- c(
+  Classify_Sox2pos_Oct4pos = "Sox2+/Oct4+",
+  Classify_Sox2pos_Oct4neg = "Sox2+/Oct4-",
+  Classify_Sox2neg_Oct4pos = "Sox2-/Oct4+",
+  Classify_NonIPSC         = "Non-IPSC"
+)
+class_levels <- unname(class_labels)
+
+missing_cols <- setdiff(names(class_labels), names(nuclei))
+if (length(missing_cols) > 0) {
+  stop("Not found in Nuclei.csv: ", paste(missing_cols, collapse = ", "),
+       "\nCheck the names with grep('^Classify_', names(nuclei), value = TRUE)")
+}
+
+class_mat <- as.matrix(nuclei[names(class_labels)])
+class_mat[is.na(class_mat)] <- 0
+assigned <- rowSums(class_mat) > 0
+
+nuclei <- nuclei %>%
+  mutate(class = if_else(
+    assigned,
+    class_levels[max.col(class_mat, ties.method = "first")],
+    "Unclassified"
+  ))
+
+nuclei <- nuclei %>%
   mutate(
-    Sox2_ratio = Intensity_MedianIntensity_Sox2_nuclei /
-                  (Intensity_MedianIntensity_Sox2_perinuclei)
+    class = if_else(class == "Unclassified", "Non-IPSC", class),
+    class = factor(class, levels = class_levels)
   )
-
-hist(all_data$Sox2_ratio, breaks = 10)
-
-#greater than 1 = pos
-all_data <- all_data %>%
-  mutate(
-    Sox2_status = ifelse(is.na(Sox2_ratio) | Sox2_ratio <= 1, "Sox2_neg", "Sox2_pos") #i checked some status is NA become NHFa4 median intensity is 0 i set to negative
-  )
-
-
-all_data <- all_data %>%
-  mutate(
-    OCT4_ratio = Intensity_MedianIntensity_Oct4_nuclei/
-                  (Intensity_MedianIntensity_Oct4_perinuclei)
-  )
-
-hist(all_data$OCT4_ratio, breaks = 10)
-
-#greater than 1 = pos
-all_data <- all_data %>%
-  mutate(
-    OCT4_status = ifelse(is.na(OCT4_ratio) | OCT4_ratio <= 1, "OCT4_neg", "OCT4_pos") #i checked some status is NA become median intensity is 0 i set to negative
-  )
-
-
-hist <- all_data %>%
-  select(
-    Metadata_slide,
-    Metadata_coverslip,
-    Metadata_sex,
-    SOX2  = Intensity_MedianIntensity_Sox2_nuclei,
-    OCT4    = Intensity_MedianIntensity_Oct4_nuclei
-  ) %>%
-  pivot_longer(
-     cols      = -c(Metadata_slide, Metadata_sex, Metadata_coverslip),  # pivot everything except the slide column
-    names_to  = "marker",
-    values_to = "intensity"
-  )
-
-ggplot(hist, aes(x = intensity, fill = marker, color = marker)) +
-  geom_density(alpha = 0.3) +
-  facet_grid(marker ~ Metadata_slide + Metadata_sex , 
-             scales = "free") +
-  scale_x_continuous(limits = c(0, 1)) +
-  labs(x = "Mean Intensity", y = "Density", 
-       title = "Per-slide intensity thresholds") +
-  theme_minimal() +
-  theme(legend.position = "none")
 
 ```
 
-#Classify cells
+# Summaries: image -> slide -> sex
 ```{r}
-# Classify cells
-all_data_classified <- all_data %>%
-  mutate(
-    Sox2_pos = Sox2_status == "Sox2_pos",
-    OCT4_pos = OCT4_status == "OCT4_pos",
-
-    # Detailed phenotype (
-  class = case_when(
-      Sox2_pos &  OCT4_pos  ~ "Sox2+/Oct4+",    
-      Sox2_pos &  !OCT4_pos ~ "Sox2+/Oct4-",
-    !Sox2_pos &  OCT4_pos ~ "Sox2-/Oct4+",
-  TRUE ~ "Non-IPSC"
-)) %>%
-select(1:7,
-         Intensity_MedianIntensity_Sox2_nuclei,
-         Intensity_MedianIntensity_Oct4_nuclei,
-         Sox2_pos, OCT4_pos, 
-         class)
-```
-
-
-#Plot  class
-```{r}
-custom_colors <- c("#330597", "#9c179e","#cc4778", "#ed7953", "#fdb42f")
-# Summarize phenotype frequencies
-# Step 1: Calculate percentages per image
-class_image <- all_data_classified %>%
-  group_by(Metadata_slide, Metadata_image, class) %>%
-  summarise(n = n(), .groups = "drop") %>%
-  group_by(Metadata_slide,, Metadata_image) %>%
+# Step 1: percent of each class per image (classes absent from an image = 0%)
+class_image <- nuclei %>%
+  count(Metadata_sex, Metadata_slide, Metadata_coverslip, ImageNumber, class, .drop = FALSE) %>%
+  group_by(Metadata_sex, Metadata_slide, Metadata_coverslip, ImageNumber) %>%
+  filter(sum(n) > 0) %>%
   mutate(percent = 100 * n / sum(n)) %>%
   ungroup()
 
-# Step 2: Calculate means across images within each slide
-class_slide <- class_image %>%
-  group_by(Metadata_slide, class) %>%
+# Step 2: mean across images within each coverslip
+class_coverslip <- class_image %>%
+  group_by(Metadata_sex, Metadata_slide, Metadata_coverslip, class) %>%
   summarise(
-    mean_percent = mean(percent, na.rm = TRUE),
+    mean_percent = mean(percent),
+    n_images     = n(),
     .groups = "drop"
   )
 
-# Step 3: Calculate means and SE across slides within each sex
-class_summary <- class_slide %>%
-  group_by(class) %>%
+# Step 2: mean across images within each slide
+class_slide <- class_coverslip %>%
+  group_by(Metadata_sex, Metadata_slide, class) %>%
   summarise(
-    grand_mean = mean(mean_percent, na.rm = TRUE),
-    sd = sd(mean_percent, na.rm = TRUE),
-    n = n(),
+    mean_percent = mean(mean_percent),
+    n_coverslips     = n(),
+    .groups = "drop"
+  )
+
+# Step 3: mean, SD and SE across slides within each sex
+class_summary <- class_slide %>%
+  group_by(Metadata_sex, class) %>%
+  summarise(
+    grand_mean = mean(mean_percent),
+    sd         = sd(mean_percent),
+    n_slides   = n(),
     .groups = "drop"
   ) %>%
-  mutate(se = sd / sqrt(n))
+  mutate(se = sd / sqrt(n_slides))
 
-# Set class order
-class_summary$class <- factor(
-  class_summary$class,
-  levels = c(
-    "Sox2+/Oct4+",
-    "Sox2+/Oct4-",
-    "Sox2-/Oct4+",
-    "Non-IPSC"
-  )
-)
-p <- ggplot(
-  class_summary,
-  aes(x = class, y = grand_mean, fill = factor(class))
-) +
-  geom_col(
-    alpha = 0.15,
-    width = 0.6
-  ) +
-
-  geom_errorbar(
-    aes(
-      ymin = grand_mean - se,
-      ymax = grand_mean + se
-    ),
-    width = 0.2
-  ) +
-
-  geom_jitter(
-    data = class_slide,
-    aes(
-      x = class,
-      y = mean_percent,
-      fill = factor(class),
-    ),
-    inherit.aes = FALSE,
-    alpha = 0.4,
-    size = 3,
-    position = position_jitterdodge(
-      dodge.width = 0.7,
-      jitter.width = 0.15
-    )
-  ) +
-
-  scale_fill_manual(values = custom_colors, name = "class") +
-
-  labs(y = "%", x = NULL) +
-
-  scale_y_continuous(
-    limits = c(0, NA),
-    expand = expansion(mult = c(0.025, 0.05))
-  ) +
-
-  theme_minimal() +
-  theme(
-    text = element_text(family = "Arial", size = 16),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "none",
-    panel.grid.major = element_blank(),
-    panel.grid.minor = element_blank(),
-    axis.line = element_line(color = "black")
-  )
-p
-#ggsave("../plots/class.png", plot = p, width = 7.5, height = 5, dpi = 300,bg = "white")
-
-class_grouped <- class %>%
-  mutate(bar_group = ifelse(class == "Non-IPSC", "Non-IPSC", "IPSC"))
-
-p_stacked_IPSC <- ggplot(class_grouped,
-       aes(x = bar_group,
-           y = mean_percent,
-           fill = factor(class))) + 
-  geom_col( 
-    alpha = 0.85,
-    width = 0.5,
-    position = position_stack()
-  ) +
-  facet_wrap(~Metadata_sex) +
-  scale_fill_manual(values = custom_colors, name = "Phenotype") +
-  
-  labs(y = "%", x = NULL) +
-  
-  scale_y_continuous(
-    limits = c(0, 100),
-    expand = expansion(mult = c(0.025, 0.05))
-  ) +
-  
-  theme_minimal() +
-  theme(
-    text = element_text(family = "Arial", size = 16),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "right",
-    panel.grid.major = element_blank(),
-    panel.grid.minor = element_blank(),
-    axis.line = element_line(color = "black")
-  )
-
-p_stacked_IPSC
-#ggsave("../plots/class_stacked2.png", plot = p_stacked,
-       #width = 5, height = 5, dpi = 300, bg = "white")
+class_summary
 ```
 
+# Shared plot style
+```{r}
+custom_colors <- c("#330597", "#9c179e", "#cc4778", "#ed7953", "#fdb42f")
+class_colors  <- setNames(custom_colors[1:4], class_levels)
 
+theme_pub <- theme_minimal() +
+  theme(
+    text = element_text(family = "Arial", size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black")
+  )
 
+p_class <- ggplot(class_summary,
+                  aes(x = class, y = grand_mean, fill = class)) +
+  geom_col(alpha = 0.3, width = 0.6) +
+  geom_errorbar(
+    aes(ymin = pmax(grand_mean - se, 0), ymax = grand_mean + se),
+    width = 0.2
+  ) +
+  geom_point(
+    data = class_slide,
+    aes(x = class, y = mean_percent, color = class),
+    inherit.aes = FALSE,
+    position = position_jitter(width = 0.12, height = 0, seed = 1),
+    size = 3, alpha = 0.7
+  ) +
+  facet_wrap(~ Metadata_sex) +
+  scale_fill_manual(values = class_colors) +
+  scale_color_manual(values = class_colors) +
+  scale_y_continuous(limits = c(0, 100),
+                     expand = expansion(mult = c(0.025, 0.05))) +
+  labs(y = "% of nuclei", x = NULL) +
+  theme_pub +
+  theme(legend.position = "none")
+
+p_class
+ggsave(file.path(plot_dir, "class.png"), p_class,
+       width = 9, height = 5, dpi = 300, bg = "white")
+```
+
+# Other plots to check
+```{r}
+class_grouped <- class_summary %>%
+  mutate(bar_group = if_else(class == "Non-IPSC", "Non-IPSC", "Stem cells"))
+
+p_stacked <- ggplot(class_grouped,
+                    aes(x = bar_group, y = grand_mean, fill = class)) +
+  geom_col(alpha = 0.85, width = 0.5, position = position_stack()) +
+  facet_wrap(~ Metadata_sex) +
+  scale_fill_manual(values = class_colors, name = "Phenotype") +
+  scale_y_continuous(expand = expansion(mult = c(0.025, 0.05))) +
+  coord_cartesian(ylim = c(0, 100)) +
+  labs(y = "% of nuclei", x = NULL) +
+  theme_pub
+
+p_stacked
+
+# class breakdown for each slide (spot outlier slides)
+p_per_slide <- ggplot(class_slide,
+                      aes(x = Metadata_slide, y = mean_percent, fill = class)) +
+  geom_col(width = 0.7, position = position_stack()) +
+  facet_grid(~ Metadata_sex, scales = "free_x", space = "free_x") +
+  scale_fill_manual(values = class_colors, name = "Phenotype") +
+  coord_cartesian(ylim = c(0, 100)) +
+  labs(y = "% of nuclei", x = NULL) +
+  theme_pub
+
+p_per_slide
+
+#cutoff
+ratio_cols <- grep("^Math_", names(nuclei), value = TRUE)
+cutoff <- 1.2
+
+ratio_long <- nuclei %>%
+  select(Metadata_sex, Metadata_slide, all_of(ratio_cols)) %>%
+  pivot_longer(all_of(ratio_cols), names_to = "marker", values_to = "ratio") %>%
+  mutate(marker = str_remove(marker, "^Math_")) %>%
+  filter(is.finite(ratio), ratio > 0)
+
+p_ratio <- ggplot(ratio_long, aes(x = ratio, color = Metadata_slide)) +
+  geom_density() +
+  geom_vline(xintercept = cutoff, linetype = "dashed") +
+  scale_x_log10() +
+  facet_grid(marker ~ Metadata_sex) +
+  labs(x = "Nuclear / perinuclear median intensity (log scale)",
+       y = "Density", color = "Slide") +
+  theme_minimal(base_size = 14)
+
+p_ratio
+```
