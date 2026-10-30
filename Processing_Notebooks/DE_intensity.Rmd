@@ -4,7 +4,7 @@ library(tidyverse)
 ```
 #to make the .csv that feeds into cell profiler 
 ```{r}
-path <- "/Users/kristineccles/SynologyDrive/comptox/iPSC-hepatocyte experiment/Staining/DE (ch0=dapi, ch1= sox17, ch2=cxcr4)/raw images/"
+path <- "/Users/compt/SynologyDrive/iPSC-hepatocyte experiment/Staining/DE (ch0=dapi, ch1= sox17, ch2=cxcr4)/raw images/"
 files <- list.files(
   path         = path,
   pattern      = "\\.tif$",
@@ -12,34 +12,23 @@ files <- list.files(
   full.names   = TRUE    # <-- keeps the full path so we can extract folder name
 )
 
+pattern <- "^(.*?)(?:[_ ]n(\\d+))?[_ ]c(\\d+)-(\\d+)_ch(\\d+)$"
+
 df <- tibble(filepath = files) %>%
-  mutate(filename = normalizePath(filepath)) %>%
   mutate(
-    filename = str_remove(filename, "\\.tif$"),
-
-  # extract channel
-    channel = str_extract(filename, "ch\\d+$") %>%
-      str_remove("ch") %>%
+    fname = basename(filepath) %>% str_remove("\\.tif$"),
+    parts = str_match(fname, pattern),
+    condition = str_trim(parts[, 2]),
+    n         = as.integer(parts[, 3]),   # NA if the file has no _n#
+    coverslip = as.integer(parts[, 4]),
+    image     = as.integer(parts[, 5]),
+    channel   = as.integer(parts[, 6]),
+    slide = str_extract(filepath, "(?i)slide\\s?\\d+") %>%
+      str_extract("\\d+") %>%
       as.integer(),
-    # extract coverslip and image number
-    coverslip = str_extract(filename, "c\\d+") %>%
-      str_remove("c") %>%
-      as.integer(),
-    image = str_extract(filename, "-\\d+_ch") %>%
-      str_remove("-") %>%
-      str_remove("_ch") %>%
-      as.integer(),
-
-    condition = str_remove(filename, "_c\\d+-\\d+_ch\\d+$") %>%
-      basename(),
-
-    # from folder name
- slide = str_extract(filepath, "(?i)slide\\s?(\\d+)") %>%
-  str_extract("\\d+") %>%
-  as.integer(),
-
-    sex = str_extract(filepath, "(?i)(female|male)")
-  )
+    sex = str_extract(filepath, "(?i)(female|male)") %>% str_to_lower()
+  ) %>%
+  select(-parts)
 
 
 # Add channel info
@@ -82,14 +71,14 @@ df_cp %>%
     slide_id <- unique(.x$Metadata_slide)
     sex_id <- unique(.x$Metadata_sex)
     
-    write_csv(.x, paste0("/Users/kristineccles/SynologyDrive/comptox/iPSC-hepatocyte experiment/Staining/DE (ch0=dapi, ch1= sox17, ch2=cxcr4)/Metadata/metadata_slide_", slide_id, sex_id, ".csv"))
+    write_csv(.x, paste0("/Users/compt/SynologyDrive/iPSC-hepatocyte experiment/Staining/DE (ch0=dapi, ch1= sox17, ch2=cxcr4)/Metadata/metadata_slide_", slide_id, sex_id, ".csv"))
   })
 
 ```
 
 # Paths AFTER CELL PROFILER
 ```{r}
-cell_profiler_input_path <- "/Users/kristineccles/SynologyDrive/comptox/iPSC-hepatocyte experiment/Staining/DE (ch0=dapi, ch1= sox17, ch2=cxcr4)/output/"
+cell_profiler_input_path <- "/Users/compt/SynologyDrive/iPSC-hepatocyte experiment/Staining/DE (ch0=dapi, ch1= sox17, ch2=cxcr4)/output/"
 
 cell_profiler_output_path  <- "../output/"
 plot_dir  <- "../plots/DE/"
