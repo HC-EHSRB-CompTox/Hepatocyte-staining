@@ -79,85 +79,110 @@ df_cp %>%
 ```
 # Paths AFTER CELL PROFILER
 ```{r}
-cell_profiler_input_path <- "/Users/kristineccles/SynologyDrive/comptox/iPSC-hepatocyte experiment/Staining/Hepatic Progenitors//output/"
+cell_profiler_input_path <- "/Users/compt/SynologyDrive/iPSC-hepatocyte experiment/Staining/D10 (ch0=dapi, ch1=afp, ch2=hnf, ch3=alb)/output/"
 
 cell_profiler_output_path  <- "../output/"
 plot_dir  <- "../plots/D10/"
 ```
 
-# Load Nuclei.csv from every slide folder
+# Load Nuclei.csv and Cytoplasm.csv from every slide folder
 ```{r}
-load_nuclei <- function(path, slide = NULL) {
+# Read one CellProfiler CSV that has a two-row header
+read_cp_combined <- function(f) {
+  hdr  <- read_csv(f, n_max = 2, col_names = FALSE,
+                   col_types = cols(.default = col_character()))
+  obj  <- unlist(hdr[1, ], use.names = FALSE)   # Image / Nuclei / Cytoplasm
+  meas <- unlist(hdr[2, ], use.names = FALSE)   # AreaShape_Area, Math_Alb_ratio, ...
+
+  # In case the object name is only written at the start of each block
+  for (i in seq_along(obj)[-1]) {
+    if (is.na(obj[i]) || obj[i] == "") obj[i] <- obj[i - 1]
+  }
+
+  nm <- make.unique(paste(obj, meas, sep = "_"))
+  read_csv(f, skip = 2, col_names = nm,
+           show_col_types = FALSE, guess_max = 10000)
+}
+
+# Loop over the Slide folders
+load_cp <- function(path, file = "Nuclei.csv", slide = NULL) {
   if (is.null(slide)) {
     slide <- list.dirs(path, recursive = FALSE, full.names = FALSE)
     slide <- slide[str_detect(slide, "^Slide")]
   }
   map_dfr(slide, function(s) {
-    f <- file.path(path, s, "Nuclei.csv")
+    f <- file.path(path, s, file)
     message("Reading: ", f)
-    read_csv(f, show_col_types = FALSE) %>%
-      mutate(slide_folder = s)
+    read_cp_combined(f) %>% mutate(slide_folder = s)
   })
 }
 
-nuclei <- load_nuclei(cell_profiler_input_path)
+cells <- load_cp(cell_profiler_input_path, file = "Nuclei.csv")
 
-# Check what CellProfiler exported
-grep("^Classify_|^Math_", names(nuclei), value = TRUE)
+# Columns now carry an object prefix, so drop the ^ from the pattern
+grep("Classify_|Math_", names(cells), value = TRUE)
 ```
 
 # Turn the Classify_ columns into one class column
 ```{r}
-class_labels <- c(
-  Classify_HNF4apos_Albpos_AFPpos = "HNF4a+/Alb+/AFP+",
-  Classify_HNF4apos_Albpos_AFPneg = "HNF4a+/Alb+/AFP-",
-  Classify_HNF4apos_Albneg_AFPpos = "HNF4a+/Alb-/AFP+",
-  Classify_HNF4apos_Albneg_AFPneg = "HNF4a+/Alb-/AFP-",
-  Classify_HNF4aneg_Albpos_AFPpos = "HNF4a-/Alb+/AFP+",
-  Classify_HNF4aneg_Albpos_AFPneg = "HNF4a-/Alb+/AFP-",
-  Classify_HNF4aneg_Albneg_AFPpos = "HNF4a-/Alb-/AFP+",
-  Classify_Non_Hepatocyte         = "Non-Hepatocyte"
+class_levels <- c(
+  "HNF4a+/Alb+/AFP+",
+  "HNF4a+/Alb+/AFP-",
+  "HNF4a+/Alb-/AFP+",
+  "HNF4a+/Alb-/AFP-",
+  "HNF4a-/Alb+/AFP+",
+  "HNF4a-/Alb+/AFP-",
+  "HNF4a-/Alb-/AFP+",
+  "Non-Hepatocyte"          # HNF4a-/Alb-/AFP-
 )
-class_levels <- unname(class_labels)
 
-missing_cols <- setdiff(names(class_labels), names(nuclei))
+pos_cols <- c("Nuclei_Classify_HNF4a_pos",
+              "Cytoplasm_Classify_Alb_pos",
+              "Cytoplasm_Classify_AFP_pos")
+
+missing_cols <- setdiff(pos_cols, names(cells))
 if (length(missing_cols) > 0) {
-  stop("Not found in Nuclei.csv: ", paste(missing_cols, collapse = ", "),
-       "\nCheck the names with grep('^Classify_', names(nuclei), value = TRUE)")
+  stop("Not found: ", paste(missing_cols, collapse = ", "),
+       "\nCheck with grep('Classify_', names(cells), value = TRUE)")
 }
 
-class_mat <- as.matrix(nuclei[names(class_labels)])
-class_mat[is.na(class_mat)] <- 0
-assigned <- rowSums(class_mat) > 0
+# How many cells have no call for a marker (e.g. a NaN ratio)?
+print(colSums(is.na(cells[pos_cols])))
 
-nuclei <- nuclei %>%
-  mutate(class = if_else(
-    assigned,
-    class_levels[max.col(class_mat, ties.method = "first")],
-    "Unclassified"
-  ))
+sign <- function(x) if_else(x, "+", "-")
 
-nuclei <- nuclei %>%
+cells <- cells %>%
   mutate(
-    class = if_else(class == "Unclassified", "Non-Hepatocyte", class),
+    hnf4a_pos = coalesce(Nuclei_Classify_HNF4a_pos == 1, FALSE),
+    alb_pos   = coalesce(Cytoplasm_Classify_Alb_pos == 1, FALSE),
+    afp_pos   = coalesce(Cytoplasm_Classify_AFP_pos == 1, FALSE),
+    class = if_else(
+      !hnf4a_pos & !alb_pos & !afp_pos,
+      "Non-Hepatocyte",
+      paste0("HNF4a", sign(hnf4a_pos),
+             "/Alb",  sign(alb_pos),
+             "/AFP",  sign(afp_pos))
+    ),
     class = factor(class, levels = class_levels)
   )
+
+count(cells, class)
 
 ```
 
 # Summaries: image -> slide -> sex
 ```{r}
 # Step 1: percent of each class per image (classes absent from an image = 0%)
-class_image <- nuclei %>%
-  count(Metadata_sex, Metadata_slide, Metadata_coverslip, ImageNumber, class, .drop = FALSE) %>%
-  group_by(Metadata_sex, Metadata_slide, Metadata_coverslip, ImageNumber) %>%
+class_image <- cells %>%
+  count(Image_Metadata_sex, Image_Metadata_slide, Image_Metadata_coverslip, Image_ImageNumber, class, .drop = FALSE) %>%
+  group_by(Image_Metadata_sex, Image_Metadata_slide, Image_Metadata_coverslip, Image_ImageNumber) %>%
   filter(sum(n) > 0) %>%
   mutate(percent = 100 * n / sum(n)) %>%
   ungroup()
 
 # Step 2: mean across images within each coverslip
 class_coverslip <- class_image %>%
-  group_by(Metadata_sex, Metadata_slide, Metadata_coverslip, class) %>%
+  group_by(Image_Metadata_sex, Image_Metadata_slide, Image_Metadata_coverslip, class) %>%
   summarise(
     mean_percent = mean(percent),
     n_images     = n(),
@@ -166,7 +191,7 @@ class_coverslip <- class_image %>%
 
 # Step 2: mean across images within each slide
 class_slide <- class_coverslip %>%
-  group_by(Metadata_sex, Metadata_slide, class) %>%
+  group_by(Image_Metadata_sex, Image_Metadata_slide, class) %>%
   summarise(
     mean_percent = mean(mean_percent),
     n_coverslips     = n(),
@@ -175,7 +200,7 @@ class_slide <- class_coverslip %>%
 
 # Step 3: mean, SD and SE across slides within each sex
 class_summary <- class_slide %>%
-  group_by(Metadata_sex, class) %>%
+  group_by(Image_Metadata_sex, class) %>%
   summarise(
     grand_mean = mean(mean_percent),
     sd         = sd(mean_percent),
@@ -189,17 +214,34 @@ class_summary
 
 # Shared plot style
 ```{r}
-custom_colors <- c("#330597", "#9c179e", "#cc4778", "#ed7953", "#fdb42f")
-class_colors  <- setNames(custom_colors[1:4], class_levels)
+# Stacked plot: classes grouped into developmental stages
+class_groups <- tribble(
+  ~class,              ~stage,
+  "Non-Hepatocyte",    "Non-hepatic",
+  "HNF4a+/Alb-/AFP-",  "Hepatic progenitor",
+  "HNF4a+/Alb-/AFP+",  "Hepatic progenitor",
+  "HNF4a+/Alb+/AFP+",  "Immature hepatocyte",
+  "HNF4a+/Alb+/AFP-",  "Mature-like hepatocyte",
+  "HNF4a-/Alb+/AFP+",  "HNF4a\u2212 atypical",
+  "HNF4a-/Alb+/AFP-",  "HNF4a\u2212 atypical",
+  "HNF4a-/Alb-/AFP+",  "HNF4a\u2212 atypical"
+)
 
-theme_pub <- theme_minimal() +
-  theme(
-    text = element_text(family = "Arial", size = 16),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    panel.grid.major = element_blank(),
-    panel.grid.minor = element_blank(),
-    axis.line = element_line(color = "black")
-  )
+stage_levels <- c("Non-hepatic", "Hepatic progenitor", "Immature hepatocyte",
+                  "Mature-like hepatocyte", "HNF4a\u2212 atypical")
+
+# Shades grouped by stage, so the pieces within each bar look related
+class_colors <- c(
+  "Non-Hepatocyte"   = "grey70",
+  "HNF4a+/Alb-/AFP-" = "#0d0887",
+  "HNF4a+/Alb-/AFP+" = "#5c01a6",
+  "HNF4a+/Alb+/AFP+" = "#9c179e",
+  "HNF4a+/Alb+/AFP-" = "#cc4778",
+  "HNF4a-/Alb+/AFP+" = "#ed7953",
+  "HNF4a-/Alb+/AFP-" = "#fdb42f",
+  "HNF4a-/Alb-/AFP+" = "#f0f921"
+)
+
 
 p_class <- ggplot(class_summary,
                   aes(x = class, y = grand_mean, fill = class)) +
@@ -215,67 +257,48 @@ p_class <- ggplot(class_summary,
     position = position_jitter(width = 0.12, height = 0, seed = 1),
     size = 3, alpha = 0.7
   ) +
-  facet_wrap(~ Metadata_sex) +
+  facet_wrap(~ Image_Metadata_sex) +
   scale_fill_manual(values = class_colors) +
   scale_color_manual(values = class_colors) +
   scale_y_continuous(limits = c(0, 100),
                      expand = expansion(mult = c(0.025, 0.05))) +
   labs(y = "% of nuclei", x = NULL) +
-  theme_pub +
+  theme_minimal() +
   theme(legend.position = "none")
 
 p_class
-ggsave(file.path(plot_dir, "class.png"), p_class,
-       width = 9, height = 5, dpi = 300, bg = "white")
-```
 
-# Other plots to check
-```{r}
-class_grouped <- class_summary %>%
-  mutate(bar_group = if_else(class == "Non-IPSC", "Non-IPSC", "Stem cells"))
+class_stage <- class_summary %>%
+  mutate(class = as.character(class)) %>%
+  left_join(class_groups, by = "class") %>%
+  mutate(stage = factor(stage, levels = stage_levels),
+         class = factor(class, levels = names(class_colors)))
 
-p_stacked <- ggplot(class_grouped,
-                    aes(x = bar_group, y = grand_mean, fill = class)) +
-  geom_col(alpha = 0.85, width = 0.5, position = position_stack()) +
-  facet_wrap(~ Metadata_sex) +
-  scale_fill_manual(values = class_colors, name = "Phenotype") +
-  scale_y_continuous(expand = expansion(mult = c(0.025, 0.05))) +
-  coord_cartesian(ylim = c(0, 100)) +
+
+p_stacked <- ggplot(class_stage,
+                    aes(x = stage, y = grand_mean, fill = class)) +
+  geom_col(width = 0.65, position = position_stack(),
+           colour = "white", linewidth = 0.2) +
+  facet_wrap(~ Image_Metadata_sex) +
+  scale_fill_manual(values = class_colors, name = "Phenotype", drop = FALSE) +
+  scale_x_discrete(labels = function(x) str_wrap(x, 10)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
   labs(y = "% of nuclei", x = NULL) +
-  theme_pub
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
 
 p_stacked
 
+
 # class breakdown for each slide (spot outlier slides)
 p_per_slide <- ggplot(class_slide,
-                      aes(x = Metadata_slide, y = mean_percent, fill = class)) +
+                      aes(x = Image_Metadata_slide, y = mean_percent, fill = class)) +
   geom_col(width = 0.7, position = position_stack()) +
-  facet_grid(~ Metadata_sex, scales = "free_x", space = "free_x") +
+  facet_grid(~ Image_Metadata_sex, scales = "free_x", space = "free_x") +
   scale_fill_manual(values = class_colors, name = "Phenotype") +
   coord_cartesian(ylim = c(0, 100)) +
   labs(y = "% of nuclei", x = NULL) +
-  theme_pub
+  theme_minimal() 
 
 p_per_slide
-
-#cutoff
-ratio_cols <- grep("^Math_", names(nuclei), value = TRUE)
-cutoff <- 1.2
-
-ratio_long <- nuclei %>%
-  select(Metadata_sex, Metadata_slide, all_of(ratio_cols)) %>%
-  pivot_longer(all_of(ratio_cols), names_to = "marker", values_to = "ratio") %>%
-  mutate(marker = str_remove(marker, "^Math_")) %>%
-  filter(is.finite(ratio), ratio > 0)
-
-p_ratio <- ggplot(ratio_long, aes(x = ratio, color = Metadata_slide)) +
-  geom_density() +
-  geom_vline(xintercept = cutoff, linetype = "dashed") +
-  scale_x_log10() +
-  facet_grid(marker ~ Metadata_sex) +
-  labs(x = "Nuclear / perinuclear median intensity (log scale)",
-       y = "Density", color = "Slide") +
-  theme_minimal(base_size = 14)
-
-p_ratio
 ```

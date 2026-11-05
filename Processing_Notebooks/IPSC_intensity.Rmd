@@ -4,7 +4,7 @@ library(tidyverse)
 ```
 #to make the .csv that feeds into cell profiler 
 ```{r}
-path <- "/Users/kristineccles/SynologyDrive/comptox/iPSC-hepatocyte experiment/Staining/IPSC (ch0=dapi, ch1= oct4, ch2=sox2)/raw images/"
+path <- "/Users/compt/SynologyDrive/iPSC-hepatocyte experiment/Staining/IPSC (ch0=dapi, ch1= oct4, ch2=sox2)/raw images/"
 files <- list.files(
   path         = path,
   pattern      = "\\.tif$",
@@ -71,13 +71,13 @@ df_cp %>%
     slide_id <- unique(.x$Metadata_slide)
     sex_id <- unique(.x$Metadata_sex)
     
-    write_csv(.x, paste0("/Users/kristineccles/SynologyDrive/comptox/iPSC-hepatocyte experiment/Staining/IPSC (ch0=dapi, ch1= oct4, ch2=sox2)/Metadata/metadata_slide_", slide_id, sex_id, ".csv"))
+    write_csv(.x, paste0("/Users/compt/SynologyDrive/iPSC-hepatocyte experiment/Staining/IPSC (ch0=dapi, ch1= oct4, ch2=sox2)/Metadata/metadata_slide_", slide_id, sex_id, ".csv"))
   })
 
 ```
 # Paths AFTER CELL PROFILER
 ```{r}
-cell_profiler_input_path <- "/Users/kristineccles/SynologyDrive/comptox/iPSC-hepatocyte experiment/Staining/IPSC (ch0=dapi, ch1= oct4, ch2=sox2)/output/"
+cell_profiler_input_path <- "/Users/compt/SynologyDrive/iPSC-hepatocyte experiment/Staining/IPSC (ch0=dapi, ch1= oct4, ch2=sox2)/output/"
 
 cell_profiler_output_path  <- "../output/"
 plot_dir  <- "../plots/IPSC"
@@ -110,7 +110,7 @@ class_labels <- c(
   Classify_Sox2pos_Oct4pos = "Sox2+/Oct4+",
   Classify_Sox2pos_Oct4neg = "Sox2+/Oct4-",
   Classify_Sox2neg_Oct4pos = "Sox2-/Oct4+",
-  Classify_NonIPSC         = "Non-IPSC"
+  Classify_NonIPSC         = "Non-Stem cell"
 )
 class_levels <- unname(class_labels)
 
@@ -133,7 +133,7 @@ nuclei <- nuclei %>%
 
 nuclei <- nuclei %>%
   mutate(
-    class = if_else(class == "Unclassified", "Non-IPSC", class),
+    class = if_else(class == "Unclassified", "Non-Stem cell", class),
     class = factor(class, levels = class_levels)
   )
 
@@ -183,17 +183,24 @@ class_summary
 
 # Shared plot style
 ```{r}
-custom_colors <- c("#330597", "#9c179e", "#cc4778", "#ed7953", "#fdb42f")
-class_colors  <- setNames(custom_colors[1:4], class_levels)
+# Stacked plot: classes grouped into developmental stages
+class_groups <- tribble(
+  ~class,          ~stage,
+  "Sox2+/Oct4+",   "Pluripotent",
+  "Sox2+/Oct4-",   "Exiting pluripotency",
+  "Sox2-/Oct4+",   "Exiting pluripotency",
+  "Non-Stem cell", "Pluripotency-negative"
+)
 
-theme_pub <- theme_minimal() +
-  theme(
-    text = element_text(family = "Arial", size = 16),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    panel.grid.major = element_blank(),
-    panel.grid.minor = element_blank(),
-    axis.line = element_line(color = "black")
-  )
+stage_levels <- c("Pluripotent", "Exiting pluripotency", "Pluripotency-negative")
+
+# Shades grouped by stage, so the pieces within each bar look related
+class_colors <- c(
+  "Non-Stem cell"   = "grey70",
+  "Sox2-/Oct4+" = "#0d0887",
+  "Sox2+/Oct4-" = "#5c01a6",
+  "Sox2+/Oct4+" = "#ed7953"
+)
 
 p_class <- ggplot(class_summary,
                   aes(x = class, y = grand_mean, fill = class)) +
@@ -215,61 +222,44 @@ p_class <- ggplot(class_summary,
   scale_y_continuous(limits = c(0, 100),
                      expand = expansion(mult = c(0.025, 0.05))) +
   labs(y = "% of nuclei", x = NULL) +
-  theme_pub +
+  theme_minimal() +
   theme(legend.position = "none")
 
 p_class
 ggsave(file.path(plot_dir, "class.png"), p_class,
        width = 9, height = 5, dpi = 300, bg = "white")
-```
 
-# Other plots to check
-```{r}
-class_grouped <- class_summary %>%
-  mutate(bar_group = if_else(class == "Non-IPSC", "Non-IPSC", "Stem cells"))
+class_stage <- class_summary %>%
+  mutate(class = as.character(class)) %>%
+  left_join(class_groups, by = "class") %>%
+  mutate(stage = factor(stage, levels = stage_levels),
+         class = factor(class, levels = names(class_colors)))
 
-p_stacked <- ggplot(class_grouped,
-                    aes(x = bar_group, y = grand_mean, fill = class)) +
-  geom_col(alpha = 0.85, width = 0.5, position = position_stack()) +
-  facet_wrap(~ Metadata_sex) +
-  scale_fill_manual(values = class_colors, name = "Phenotype") +
-  scale_y_continuous(expand = expansion(mult = c(0.025, 0.05))) +
-  coord_cartesian(ylim = c(0, 100)) +
+
+p_stacked <- ggplot(class_stage,
+                    aes(x = stage, y = grand_mean, fill = class)) +
+  geom_col(width = 0.65, position = position_stack(),
+           colour = "white", linewidth = 0.2) +
+  facet_wrap(~ Image_Metadata_sex) +
+  scale_fill_manual(values = class_colors, name = "Phenotype", drop = FALSE) +
+  scale_x_discrete(labels = function(x) str_wrap(x, 10)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
   labs(y = "% of nuclei", x = NULL) +
-  theme_pub
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
 
 p_stacked
 
+
 # class breakdown for each slide (spot outlier slides)
 p_per_slide <- ggplot(class_slide,
-                      aes(x = Metadata_slide, y = mean_percent, fill = class)) +
+                      aes(x = Image_Metadata_slide, y = mean_percent, fill = class)) +
   geom_col(width = 0.7, position = position_stack()) +
-  facet_grid(~ Metadata_sex, scales = "free_x", space = "free_x") +
+  facet_grid(~ Image_Metadata_sex, scales = "free_x", space = "free_x") +
   scale_fill_manual(values = class_colors, name = "Phenotype") +
   coord_cartesian(ylim = c(0, 100)) +
   labs(y = "% of nuclei", x = NULL) +
-  theme_pub
+  theme_minimal() 
 
 p_per_slide
-
-#cutoff
-ratio_cols <- grep("^Math_", names(nuclei), value = TRUE)
-cutoff <- 1.2
-
-ratio_long <- nuclei %>%
-  select(Metadata_sex, Metadata_slide, all_of(ratio_cols)) %>%
-  pivot_longer(all_of(ratio_cols), names_to = "marker", values_to = "ratio") %>%
-  mutate(marker = str_remove(marker, "^Math_")) %>%
-  filter(is.finite(ratio), ratio > 0)
-
-p_ratio <- ggplot(ratio_long, aes(x = ratio, color = Metadata_slide)) +
-  geom_density() +
-  geom_vline(xintercept = cutoff, linetype = "dashed") +
-  scale_x_log10() +
-  facet_grid(marker ~ Metadata_sex) +
-  labs(x = "Nuclear / perinuclear median intensity (log scale)",
-       y = "Density", color = "Slide") +
-  theme_minimal(base_size = 14)
-
-p_ratio
 ```
