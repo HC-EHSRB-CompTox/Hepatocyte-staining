@@ -85,7 +85,7 @@ cell_profiler_output_path  <- "../output/"
 plot_dir  <- "../plots/D10/"
 ```
 
-# Load Nuclei.csv and Cytoplasm.csv from every slide folder
+# Load Nuclei.csv from every slide folder
 ```{r}
 # Read one CellProfiler CSV that has a two-row header
 read_cp_combined <- function(f) {
@@ -138,7 +138,7 @@ class_levels <- c(
 
 pos_cols <- c("Nuclei_Classify_HNF4a_pos",
               "Cytoplasm_Classify_Alb_pos",
-              "Cytoplasm_Classify_AFP_pos")
+              "ExpandedPerinuclear_Classify_AFP_pos")
 
 missing_cols <- setdiff(pos_cols, names(cells))
 if (length(missing_cols) > 0) {
@@ -154,8 +154,8 @@ sign <- function(x) if_else(x, "+", "-")
 cells <- cells %>%
   mutate(
     hnf4a_pos = coalesce(Nuclei_Classify_HNF4a_pos == 1, FALSE),
-    alb_pos   = coalesce(Cytoplasm_Classify_Alb_pos == 1, FALSE),
-    afp_pos   = coalesce(Cytoplasm_Classify_AFP_pos == 1, FALSE),
+    alb_pos   = coalesce(Cell_Classify_Alb_pos == 1, FALSE),
+    afp_pos   = coalesce(ExpandedPerinuclear_Classify_AFP_pos == 1, FALSE),
     class = if_else(
       !hnf4a_pos & !alb_pos & !afp_pos,
       "Non-Hepatocyte",
